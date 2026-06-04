@@ -81,13 +81,23 @@ logging.getLogger('asyncio').setLevel(logging.WARNING)
 
 # Инициализация бота с опциональной поддержкой прокси
 _default = DefaultBotProperties(parse_mode=ParseMode.HTML)
-if PROXY_URL:
-    logger.info(f"🌐 Использование прокси: {PROXY_URL}")
-    session = AiohttpSession(proxy=PROXY_URL)
-    bot = Bot(token=TOKEN, session=session, default=_default)
-else:
-    logger.info("🌐 Прямое соединение (без прокси)")
-    bot = Bot(token=TOKEN, default=_default)
+
+
+def _create_bot(use_proxy: bool = True) -> Bot:
+    """Создать экземпляр бота с прокси (если указан) или напрямую."""
+    if use_proxy and PROXY_URL:
+        logger.info(f"🌐 Использование прокси: {PROXY_URL} (таймаут 300с)")
+        session = AiohttpSession(proxy=PROXY_URL, timeout=300)
+        return Bot(token=TOKEN, session=session, default=_default)
+    else:
+        if PROXY_URL and not use_proxy:
+            logger.warning("⚠️ Прокси недоступен, переключение на прямое соединение")
+        else:
+            logger.info("🌐 Прямое соединение (без прокси)")
+        return Bot(token=TOKEN, default=_default)
+
+
+bot = _create_bot()
 
 dp = Dispatcher()
 
@@ -169,13 +179,21 @@ async def handle_business_connection(conn: BusinessConnection):
     await db.upsert_connection(conn.id, user_id, conn.is_enabled, can_reply)
 
     if conn.is_enabled:
-        try:
-            await bot.send_message(
-                user_id,
-                "✅ Секретарь подключён!\n\n"
-                f"Теперь я слежу за входящими. Если ты не ответишь клиенту за "
-                f"{REMINDER_MINUTES} мин — напомню."
+        # Проверяем настройку приватности пересылки
+        has_private = await _check_has_private_forwards(user_id)
+        msg = (
+            "✅ Секретарь подключён!\n\n"
+            f"Теперь я слежу за входящими. Если ты не ответишь клиенту за "
+            f"{REMINDER_MINUTES} мин — напомню."
+        )
+        if has_private:
+            msg += (
+                "\n\n⚠️ <b>Внимание:</b> У вас включена приватность пересылки.\n"
+                "Кнопки-ссылки на чаты клиентов без username не будут работать.\n"
+                "Отключите в Настройках → Приватность → Пересылка."
             )
+        try:
+            await bot.send_message(user_id, msg)
         except Exception as e:
             logger.warning(f"Could not notify: {e}")
     else:
@@ -217,6 +235,37 @@ def _message_preview(message: Message) -> str:
         "contact": "👤 Контакт",
     }
     return type_labels.get(ct, "📨 Сообщение без текста")
+
+
+# ─── Приватность пересылки (has_private_forwards) ─────────────────────
+# Кэш: owner_id -> bool (True = включена приватность, URL-ID кнопки не работают)
+_has_private_forwards_cache: dict[int, bool] = {}
+_private_cache_time: dict[int, float] = {}
+_PRIVATE_CACHE_TTL = 3600  # 1 час
+
+
+async def _check_has_private_forwards(owner_id: int) -> bool:
+    """Проверить has_private_forwards у владельца через getChat.
+
+    Если True — URL-ID кнопки (tg://user?id=...) не будут работать.
+    Результат кэшируется на 1 час.
+    """
+    now = time.time()
+    cached = _has_private_forwards_cache.get(owner_id)
+    cached_at = _private_cache_time.get(owner_id, 0)
+    if cached is not None and (now - cached_at) < _PRIVATE_CACHE_TTL:
+        return cached
+    try:
+        chat = await bot.get_chat(owner_id)
+        has_private = getattr(chat, "has_private_forwards", False)
+        _has_private_forwards_cache[owner_id] = has_private
+        _private_cache_time[owner_id] = now
+        if has_private:
+            logger.info(f"👤 Владелец {owner_id} имеет has_private_forwards=True — URL-ID кнопки недоступны")
+        return has_private
+    except Exception as e:
+        logger.warning(f"Не удалось проверить has_private_forwards для {owner_id}: {e}")
+        return False
 
 
 # Обработчик БИЗНЕС-сообщений (Telegram Business / Secretary Mode)
@@ -311,12 +360,17 @@ def _chat_link(thread: dict) -> str:
     return f"tg://user?id={thread['chat_id']}"
 
 
-def _reminder_keyboard(thread: dict) -> InlineKeyboardMarkup:
+def _reminder_keyboard(thread: dict, has_private_forwards: bool = False) -> InlineKeyboardMarkup:
     thread_id = thread["id"]
-    rows = [
-        [InlineKeyboardButton(text="💬 Открыть чат", url=_chat_link(thread))],
-        [InlineKeyboardButton(text="✅ Готово (ответил)", callback_data=f"done:{thread_id}")],
-    ]
+    rows = []
+
+    # Кнопка «Открыть чат»: URL-ID (tg://user?id=...) не работает при has_private_forwards=True
+    username = thread.get("client_username")
+    can_use_url_id = username is not None or not has_private_forwards
+    if can_use_url_id:
+        rows.append([InlineKeyboardButton(text="💬 Открыть чат", url=_chat_link(thread))])
+
+    rows.append([InlineKeyboardButton(text="✅ Готово (ответил)", callback_data=f"done:{thread_id}")])
     # Кнопки snooze в две колонки
     snooze_row = []
     for label, minutes in SNOOZE_OPTIONS:
@@ -352,11 +406,22 @@ def _reminder_text(thread: dict) -> str:
 
 async def _send_reminder(thread: dict):
     owner_id = thread["owner_user_id"]
+    has_private = await _check_has_private_forwards(owner_id)
+    text = _reminder_text(thread)
+
+    # Если у владельца включена приватность и у клиента нет username —
+    # URL-ID кнопка не сработает, предупреждаем в тексте
+    if has_private and not thread.get("client_username"):
+        text += (
+            "\n\n⚠️ <i>Кнопка чата недоступна: у вас включена приватность пересылки.\n"
+            "Отключите в Настройках → Приватность → Пересылка.</i>"
+        )
+
     try:
         await bot.send_message(
             chat_id=owner_id,
-            text=_reminder_text(thread),
-            reply_markup=_reminder_keyboard(thread),
+            text=text,
+            reply_markup=_reminder_keyboard(thread, has_private_forwards=has_private),
             disable_web_page_preview=True,
         )
         # Планируем следующий повтор, если лимит не исчерпан.
@@ -435,10 +500,13 @@ async def cb_snooze(callback: CallbackQuery):
 
 
 async def main():
+    global bot  # может быть пересоздан при падении прокси
     max_retries = 5
     retry_count = 0
     retry_delay = 2
-    
+    using_proxy = PROXY_URL is not None
+    proxy_failures = 0
+
     await db.init_db()
     logger.info("🗄️ База данных инициализирована")
 
@@ -473,30 +541,39 @@ async def main():
                 ],
             )
             break  # Выход из цикла retry при успехе
-            
+
         except (ClientConnectionError, ClientOSError, asyncio.TimeoutError) as e:
             retry_count += 1
             logger.error(f"❌ Ошибка сетевого соединения: {type(e).__name__}: {e}")
             logger.warning(f"⏳ Попытка {retry_count}/{max_retries}. Переподключение через {retry_delay}с...")
-            
+
+            # Fallback: если прокси падает дважды — переключаемся на прямое соединение
+            if using_proxy and isinstance(e, (ClientConnectionError, asyncio.TimeoutError)):
+                proxy_failures += 1
+                if proxy_failures >= 2:
+                    logger.warning("⚠️ Прокси недоступен, переключаюсь на прямое соединение")
+                    await bot.session.close()
+                    bot = _create_bot(use_proxy=False)
+                    using_proxy = False
+
             if retry_count < max_retries:
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 30)
             else:
                 logger.critical("💀 Исчерпаны все попытки переподключения")
                 raise
-                
+
         except ClientError as e:
             retry_count += 1
             logger.error(f"❌ Ошибка HTTP клиента: {e}")
             logger.warning(f"⏳ Переподключение через {retry_delay}с...")
-            
+
             if retry_count < max_retries:
                 await asyncio.sleep(retry_delay)
             else:
                 logger.critical("💀 Критическая ошибка клиента")
                 raise
-                
+
         except (asyncio.CancelledError, KeyboardInterrupt):
             logger.info("⏹️ Бот остановлен (Ctrl+C)")
             break
