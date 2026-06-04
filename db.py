@@ -78,6 +78,18 @@ async def get_owner(business_connection_id):
             return row[0] if row else None
 
 
+async def get_connection_by_owner(owner_user_id):
+    """Вернуть первое активное подключение владельца (или None)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM connections WHERE owner_user_id=? AND is_enabled=1 LIMIT 1",
+            (owner_user_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
 async def open_or_update_thread(
     business_connection_id,
     owner_user_id,

@@ -117,6 +117,16 @@ async def cmd_start(message: Message):
 async def cmd_status(message: Message):
     user_id = message.from_user.id
     conn_info = user_connections.get(user_id)
+    # Если в кэше нет — пробуем загрузить из БД
+    if conn_info is None:
+        db_conn = await db.get_connection_by_owner(user_id)
+        if db_conn:
+            conn_info = {
+                "is_enabled": bool(db_conn["is_enabled"]),
+                "can_reply": bool(db_conn["can_reply"]),
+            }
+            # восстанавливаем кэш
+            user_connections[user_id] = conn_info
     if conn_info and conn_info.get("is_enabled"):
         open_count = await db.count_open(user_id)
         await message.answer(
