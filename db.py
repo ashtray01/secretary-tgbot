@@ -47,8 +47,8 @@ CREATE TABLE IF NOT EXISTS user_settings (
     owner_user_id          INTEGER PRIMARY KEY,
     reminder_delay         INTEGER NOT NULL DEFAULT 10,
     active_time_start      TEXT    NOT NULL DEFAULT '09:00',
-    active_time_end        TEXT    NOT NULL DEFAULT '21:00',
-    active_days            TEXT    NOT NULL DEFAULT '1,2,3,4,5',
+    active_time_end        TEXT    NOT NULL DEFAULT '18:00',
+    active_days            TEXT    NOT NULL DEFAULT '0,1,2,3,4',
     max_reminders          INTEGER NOT NULL DEFAULT 6
 );
 
@@ -256,8 +256,8 @@ async def get_settings(owner_user_id: int) -> dict:
         "owner_user_id": owner_user_id,
         "reminder_delay": 10,
         "active_time_start": "09:00",
-        "active_time_end": "21:00",
-        "active_days": "1,2,3,4,5",
+        "active_time_end": "18:00",
+        "active_days": "0,1,2,3,4",
         "max_reminders": 6,
     }
 
