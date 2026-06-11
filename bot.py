@@ -516,14 +516,14 @@ def _is_in_active_period(settings: dict, now_dt: datetime.datetime | None = None
     if now_dt is None:
         now_dt = datetime.datetime.now()
     # День недели (0=ПН … 6=ВС)
-    active_days_str = settings.get("active_days", "1,2,3,4,5")
+    active_days_str = settings.get("active_days", "0,1,2,3,4")
     active_days = {int(d.strip()) for d in active_days_str.split(",") if d.strip()}
     if now_dt.weekday() not in active_days:
         return False
     # Время
     cur_min = now_dt.hour * 60 + now_dt.minute
     start_h, start_m = _parse_time(settings.get("active_time_start", "09:00"))
-    end_h, end_m = _parse_time(settings.get("active_time_end", "21:00"))
+    end_h, end_m = _parse_time(settings.get("active_time_end", "18:00"))
     start_min = start_h * 60 + start_m
     end_min = end_h * 60 + end_m
     return start_min <= cur_min < end_min
@@ -661,9 +661,11 @@ async def handle_business_messages(message: Message):
                 f"Напомню через {settings['reminder_delay']} мин."
             )
         else:
-            # Неактивный период — откладываем на начало следующего активного
+            # Неактивный период — откладываем на начало следующего активного.
+            # Сообщение уже прождало, поэтому напоминаем сразу в начале периода,
+            # без дополнительной задержки.
             next_start = _get_next_active_start(settings)
-            due_at = next_start + delay_sec
+            due_at = next_start
             logger.info(
                 f"📥 Входящее от {_client_display_name(message)} (chat={chat_id}) "
                 f"в неактивный период. Дайджест в начале следующего активного окна."
